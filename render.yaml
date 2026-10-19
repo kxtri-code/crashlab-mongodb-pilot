@@ -1,0 +1,22 @@
+# Render Deployment Blueprint for CrashLab MongoDB Pilot Fixture
+# Separate web service decoupled from CrashLab's control plane and Supabase database.
+services:
+  - type: web
+    name: crashlab-mongodb-pilot
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: staging
+      - key: TEST_MODE
+        value: "true"
+      - key: PORT
+        value: "3000"
+      - key: MONGODB_URI
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true

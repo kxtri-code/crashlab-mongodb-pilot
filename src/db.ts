@@ -29,18 +29,11 @@ export async function connectToDatabase(customUri?: string): Promise<{ db: Db; u
 
   const mongoUri: string = uri!;
 
-  const clientOptions: any = {
-    connectTimeoutMS: 5000,
-    serverSelectionTimeoutMS: 5000,
-  };
-
-  // Preserve authSource=admin for hosted MongoDB / Atlas replica sets if not in URI
-  if (!mongoUri.includes('authSource=') && !memoryServerInstance) {
-    clientOptions.authSource = 'admin';
-  }
-
   try {
-    const newClient = new MongoClient(mongoUri, clientOptions);
+    const newClient = new MongoClient(mongoUri, {
+      connectTimeoutMS: 10000,
+      serverSelectionTimeoutMS: 10000,
+    });
     await newClient.connect();
     const newDb = newClient.db('crashlab_pilot_staging');
 

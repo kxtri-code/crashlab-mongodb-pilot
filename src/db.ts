@@ -87,12 +87,22 @@ export interface DatabaseBoundaryResult {
   canIndexStaging: boolean;
   crossDatabaseDenied: boolean;
   crossDatabaseMessage: string;
+  authenticatedUserRoles?: Array<{ role: string; db: string }>;
   isMemoryServer?: boolean;
 }
 
 export async function verifyDatabaseBoundaries(): Promise<DatabaseBoundaryResult> {
   const currentDb = getDatabase();
   const currentClient = getClient();
+
+  // 0. Inspect authenticated user roles from MongoDB connectionStatus
+  let authenticatedUserRoles: Array<{ role: string; db: string }> = [];
+  try {
+    const connStatus = await currentDb.command({ connectionStatus: 1 });
+    authenticatedUserRoles = connStatus?.authInfo?.authenticatedUserRoles || [];
+  } catch {
+    // Non-fatal if command unsupported
+  }
 
   // 1. Verify read on staging database
   const userCount = await currentDb.collection('users').countDocuments();
@@ -128,6 +138,7 @@ export async function verifyDatabaseBoundaries(): Promise<DatabaseBoundaryResult
       canIndexStaging,
       crossDatabaseDenied,
       crossDatabaseMessage,
+      authenticatedUserRoles: [{ role: 'readWrite', db: 'crashlab_pilot_staging' }],
       isMemoryServer: true,
     };
   }
@@ -139,10 +150,10 @@ export async function verifyDatabaseBoundaries(): Promise<DatabaseBoundaryResult
       serverSelectionTimeoutMS: 5000,
     });
     await testClient.connect();
-    // Non-destructive check: listing collections on an unrelated database requires cross-database privileges
-    await testClient.db('unrelated_prod_db').command({ listCollections: 1 });
+    // Non-destructive check: reading from an unrelated foreign database collection requires cross-database privileges
+    await testClient.db('unrelated_prod_db').collection('forbidden_records').findOne();
     crossDatabaseDenied = false;
-    crossDatabaseMessage = 'UNRESTRICTED: Foreign database command succeeded without authorization rejection';
+    crossDatabaseMessage = 'UNRESTRICTED: Foreign database query succeeded without authorization rejection';
   } catch (err: any) {
     crossDatabaseDenied = true;
     crossDatabaseMessage = err?.message || 'Access denied on foreign database';
@@ -152,14 +163,21 @@ export async function verifyDatabaseBoundaries(): Promise<DatabaseBoundaryResult
     }
   }
 
+  // Least-privilege role check: must have readWrite on crashlab_pilot_staging and not broad any-database roles
+  const hasBroadRole = authenticatedUserRoles.some(
+    (r) => r.role === 'readWriteAnyDatabase' || r.role === 'userAdminAnyDatabase' || r.role === 'dbAdminAnyDatabase' || r.role === 'root' || r.role === 'atlasAdmin'
+  );
+  const isLeastPrivilege = crossDatabaseDenied && !hasBroadRole;
+
   return {
-    status: canReadStaging && canWriteStaging && canIndexStaging && crossDatabaseDenied ? 'ok' : 'violation',
+    status: canReadStaging && canWriteStaging && canIndexStaging && isLeastPrivilege ? 'ok' : 'violation',
     stagingDatabase: 'crashlab_pilot_staging',
     canReadStaging,
     canWriteStaging,
     canIndexStaging,
     crossDatabaseDenied,
     crossDatabaseMessage,
+    authenticatedUserRoles,
     isMemoryServer: false,
   };
 }

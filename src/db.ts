@@ -132,20 +132,23 @@ export async function verifyDatabaseBoundaries(): Promise<DatabaseBoundaryResult
     };
   }
 
+  let testClient: MongoClient | null = null;
   try {
-    // Non-destructive read attempt on unrelated database
-    await currentClient
-      .db('unrelated_prod_db')
-      .collection('unrelated_probe')
-      .findOne({});
-    // If no error thrown, user still has broader permissions (e.g. readWriteAnyDatabase)
+    testClient = new MongoClient(process.env.MONGODB_URI || '', {
+      connectTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 5000,
+    });
+    await testClient.connect();
+    await testClient.db('unrelated_prod_db').collection('unrelated_probe').findOne({});
     crossDatabaseDenied = false;
     crossDatabaseMessage = 'UNRESTRICTED: Foreign database read succeeded without authorization rejection';
   } catch (err: any) {
-    // User correctly restricted to only crashlab_pilot_staging database:
-    // MongoServerError: not authorized on unrelated_prod_db to execute command: { find: ... } (code 13)
     crossDatabaseDenied = true;
     crossDatabaseMessage = err?.message || 'Access denied on foreign database';
+  } finally {
+    if (testClient) {
+      await testClient.close().catch(() => {});
+    }
   }
 
   return {

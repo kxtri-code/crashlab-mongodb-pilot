@@ -139,9 +139,10 @@ export async function verifyDatabaseBoundaries(): Promise<DatabaseBoundaryResult
       serverSelectionTimeoutMS: 5000,
     });
     await testClient.connect();
-    await testClient.db('unrelated_prod_db').collection('unrelated_probe').findOne({});
+    // Non-destructive check: listing collections on an unrelated database requires cross-database privileges
+    await testClient.db('unrelated_prod_db').command({ listCollections: 1 });
     crossDatabaseDenied = false;
-    crossDatabaseMessage = 'UNRESTRICTED: Foreign database read succeeded without authorization rejection';
+    crossDatabaseMessage = 'UNRESTRICTED: Foreign database command succeeded without authorization rejection';
   } catch (err: any) {
     crossDatabaseDenied = true;
     crossDatabaseMessage = err?.message || 'Access denied on foreign database';

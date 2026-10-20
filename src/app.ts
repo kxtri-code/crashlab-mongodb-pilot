@@ -1,6 +1,6 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
-import { getCollections, checkReadiness, verifyDatabaseBoundaries } from './db.js';
+import { getCollections, checkReadiness, verifyDatabaseBoundaries, diagnoseDatabaseConnection } from './db.js';
 import { verifyPassword, createSession, signSession, verifySession } from './auth.js';
 import type { StagingSession } from './types.js';
 
@@ -338,6 +338,30 @@ export function createApp() {
         status: 'error',
         error: 'Failed to verify database boundaries.',
       });
+    }
+  });
+
+  // 9. Diagnostic connection endpoint (staging/test only, strictly zero secret leakage)
+  app.get('/api/staging/diagnose-connection', async (_req: Request, res: Response) => {
+    const isStagingOrTest =
+      process.env.NODE_ENV === 'staging' ||
+      process.env.TEST_MODE === 'true' ||
+      process.env.NODE_ENV === 'test' ||
+      process.env.NODE_ENV === 'development';
+
+    if (!isStagingOrTest) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'FORBIDDEN_ENVIRONMENT', message: 'Diagnostics forbidden in production' },
+      });
+    }
+
+    try {
+      const diagnosis = await diagnoseDatabaseConnection();
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(200).json(diagnosis);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
     }
   });
 

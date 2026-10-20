@@ -1,4 +1,6 @@
 import { MongoClient, type Db, type Collection } from 'mongodb';
+import tls from 'node:tls';
+import dns from 'node:dns/promises';
 import type { StagingUser, StagingEvent } from './types.js';
 
 let client: MongoClient | null = null;
@@ -187,4 +189,151 @@ export async function closeDatabase(): Promise<void> {
     await memoryServerInstance.stop();
     memoryServerInstance = null;
   }
+}
+
+export interface ConnectionDiagnosis {
+  configured: boolean;
+  protocol?: string;
+  username?: string;
+  hasPassword?: boolean;
+  passwordLength?: number;
+  host?: string;
+  database?: string;
+  queryParams?: Record<string, string>;
+  hasAuthSourceAdmin?: boolean;
+  dnsResolution?: {
+    srvRecordsFound: number;
+    sampleShardHost?: string;
+    sampleShardPort?: number;
+    error?: string;
+  };
+  tlsHandshakeTest?: {
+    success: boolean;
+    authorized?: boolean;
+    protocol?: string;
+    cipher?: string;
+    error?: string;
+  };
+  clientPingTest?: {
+    success: boolean;
+    error?: string;
+  };
+}
+
+export async function diagnoseDatabaseConnection(): Promise<ConnectionDiagnosis> {
+  const uri = process.env.MONGODB_URI;
+  if (!uri || uri === 'memory') {
+    return { configured: false };
+  }
+
+  const diagnosis: ConnectionDiagnosis = {
+    configured: true,
+  };
+
+  try {
+    const parsed = new URL(uri.replace('mongodb+srv://', 'https://').replace('mongodb://', 'http://'));
+    diagnosis.protocol = uri.startsWith('mongodb+srv://') ? 'mongodb+srv' : 'mongodb';
+    diagnosis.username = parsed.username || undefined;
+    diagnosis.hasPassword = !!parsed.password;
+    diagnosis.passwordLength = parsed.password ? parsed.password.length : 0;
+    diagnosis.host = parsed.hostname;
+    diagnosis.database = (parsed.pathname || '').replace(/^\//, '');
+
+    const params: Record<string, string> = {};
+    parsed.searchParams.forEach((val, key) => {
+      params[key] = val;
+    });
+    diagnosis.queryParams = params;
+    diagnosis.hasAuthSourceAdmin = params['authSource'] === 'admin';
+
+    let sampleShardHost = '';
+    let sampleShardPort = 27017;
+    try {
+      if (diagnosis.protocol === 'mongodb+srv' && diagnosis.host) {
+        const srvName = `_mongodb._tcp.${diagnosis.host}`;
+        const records = await dns.resolveSrv(srvName);
+        diagnosis.dnsResolution = {
+          srvRecordsFound: records.length,
+          sampleShardHost: records[0]?.name,
+          sampleShardPort: records[0]?.port,
+        };
+        sampleShardHost = records[0]?.name || '';
+        sampleShardPort = records[0]?.port || 27017;
+      }
+    } catch (dnsErr: any) {
+      diagnosis.dnsResolution = {
+        srvRecordsFound: 0,
+        error: dnsErr.message,
+      };
+    }
+
+    const targetTlsHost = sampleShardHost || diagnosis.host;
+    if (targetTlsHost) {
+      try {
+        const tlsResult = await new Promise<{
+          success: boolean;
+          authorized?: boolean;
+          protocol?: string;
+          cipher?: string;
+          error?: string;
+        }>((resolve) => {
+          const socket = tls.connect(
+            {
+              host: targetTlsHost,
+              port: sampleShardPort,
+              servername: targetTlsHost,
+              rejectUnauthorized: false,
+              timeout: 4000,
+            },
+            () => {
+              const info = {
+                success: true,
+                authorized: socket.authorized,
+                protocol: socket.getProtocol() || undefined,
+                cipher: socket.getCipher()?.name,
+              };
+              socket.end();
+              resolve(info);
+            }
+          );
+
+          socket.on('error', (err) => {
+            resolve({ success: false, error: err.message });
+          });
+
+          socket.on('timeout', () => {
+            socket.destroy();
+            resolve({ success: false, error: 'TLS handshake timeout' });
+          });
+        });
+
+        diagnosis.tlsHandshakeTest = tlsResult;
+      } catch (tlsErr: any) {
+        diagnosis.tlsHandshakeTest = { success: false, error: tlsErr.message };
+      }
+    }
+
+    try {
+      if (!client || !db) {
+        await connectToDatabase();
+      }
+      if (db) {
+        await db.command({ ping: 1 });
+        diagnosis.clientPingTest = { success: true };
+      } else {
+        diagnosis.clientPingTest = { success: false, error: 'Database not initialized' };
+      }
+    } catch (clientErr: any) {
+      diagnosis.clientPingTest = {
+        success: false,
+        error: (clientErr.message || 'Client connect failed')
+          .replace(/mongodb(\+srv)?:\/\/[^\s@]+@/gi, 'mongodb+srv://[REDACTED]@')
+          .replace(/:[^:@/\s]+@/g, ':[REDACTED]@'),
+      };
+    }
+  } catch (parseErr: any) {
+    diagnosis.clientPingTest = { success: false, error: parseErr.message };
+  }
+
+  return diagnosis;
 }

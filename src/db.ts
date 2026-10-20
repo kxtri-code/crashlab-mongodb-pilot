@@ -11,6 +11,8 @@ export interface DbCollections {
   testMetadata: Collection<{ key: string; value: any; updatedAt: string }>;
 }
 
+let lastError: string | null = null;
+
 export async function connectToDatabase(customUri?: string): Promise<{ db: Db; uri: string }> {
   if (db && client) {
     return { db, uri: 'mongodb://connected' };
@@ -37,16 +39,26 @@ export async function connectToDatabase(customUri?: string): Promise<{ db: Db; u
     clientOptions.authSource = 'admin';
   }
 
-  client = new MongoClient(mongoUri, clientOptions);
+  try {
+    const newClient = new MongoClient(mongoUri, clientOptions);
+    await newClient.connect();
+    const newDb = newClient.db('crashlab_pilot_staging');
 
-  await client.connect();
-  db = client.db('crashlab_pilot_staging');
+    // Ensure unique index on user email
+    await newDb.collection<StagingUser>('users').createIndex({ email: 1 }, { unique: true });
+    await newDb.collection<StagingEvent>('events').createIndex({ id: 1 }, { unique: true });
 
-  // Ensure unique index on user email
-  await db.collection<StagingUser>('users').createIndex({ email: 1 }, { unique: true });
-  await db.collection<StagingEvent>('events').createIndex({ id: 1 }, { unique: true });
-
-  return { db, uri: 'mongodb://connected' };
+    client = newClient;
+    db = newDb;
+    lastError = null;
+    return { db, uri: 'mongodb://connected' };
+  } catch (err: any) {
+    const sanitizedMsg = (err?.message || 'Connection failed')
+      .replace(/mongodb(\+srv)?:\/\/[^\s@]+@/gi, 'mongodb+srv://[REDACTED]@')
+      .replace(/:[^:@/\s]+@/g, ':[REDACTED]@');
+    lastError = sanitizedMsg;
+    throw new Error(sanitizedMsg);
+  }
 }
 
 export function getClient(): MongoClient {
@@ -156,13 +168,19 @@ export async function verifyDatabaseBoundaries(): Promise<DatabaseBoundaryResult
 export async function checkReadiness(): Promise<{ ready: boolean; error?: string }> {
   try {
     if (!client || !db) {
-      return { ready: false, error: 'Database client not initialized.' };
+      try {
+        await connectToDatabase();
+      } catch {
+        return { ready: false, error: lastError || 'Database client not initialized.' };
+      }
+    }
+    if (!client || !db) {
+      return { ready: false, error: lastError || 'Database client not initialized.' };
     }
     await db.command({ ping: 1 });
     return { ready: true };
   } catch (err: any) {
-    // Return safe failure message without exposing connection strings or internal credentials
-    return { ready: false, error: 'Database ping failed.' };
+    return { ready: false, error: lastError || 'Database ping failed.' };
   }
 }
 

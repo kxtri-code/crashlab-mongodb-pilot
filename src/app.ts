@@ -1,6 +1,6 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
-import { getCollections, checkReadiness } from './db.js';
+import { getCollections, checkReadiness, verifyDatabaseBoundaries } from './db.js';
 import { verifyPassword, createSession, signSession, verifySession } from './auth.js';
 import type { StagingSession } from './types.js';
 
@@ -309,6 +309,36 @@ export function createApp() {
       status: 'ready',
       database: 'connected',
     });
+  });
+
+  // 8. Boundary verification probe endpoint (staging/test only)
+  app.get('/api/staging/boundary-check', async (_req: Request, res: Response) => {
+    const isStagingOrTest =
+      process.env.NODE_ENV === 'staging' ||
+      process.env.TEST_MODE === 'true' ||
+      process.env.NODE_ENV === 'test' ||
+      process.env.NODE_ENV === 'development';
+
+    if (!isStagingOrTest) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN_ENVIRONMENT',
+          message: 'Boundary check endpoint is restricted to staging and test environments.',
+        },
+      });
+    }
+
+    try {
+      const result = await verifyDatabaseBoundaries();
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(200).json(result);
+    } catch (err: any) {
+      return res.status(500).json({
+        status: 'error',
+        error: 'Failed to verify database boundaries.',
+      });
+    }
   });
 
   // 5. Controlled defect probe endpoint

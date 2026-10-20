@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
-import { connectToDatabase, closeDatabase, getCollections, checkReadiness } from '../src/db.js';
+import { connectToDatabase, closeDatabase, getCollections, checkReadiness, verifyDatabaseBoundaries } from '../src/db.js';
 import { seedDatabase, SEEDED_USER_EMAIL, SEEDED_USER_PASSWORD, SEEDED_EVENTS } from '../src/seed.js';
 import { createApp } from '../src/app.js';
 import type { Express } from 'express';
@@ -281,5 +281,47 @@ describe('CrashLab MongoDB Pilot Fixture — 17-Point Requirement Test Suite', (
     const simulatedError = { ready: false, error: 'Database ping failed.' };
     expect(simulatedError.ready).toBe(false);
     expect(simulatedError.error).not.toContain('mongodb://');
+  });
+
+  // 18. Database boundary verification and least-privilege isolation
+  it('18. verifies staging database boundaries and isolation from unrelated databases', async () => {
+    const boundaryRes = await verifyDatabaseBoundaries();
+    expect(boundaryRes.stagingDatabase).toBe('crashlab_pilot_staging');
+    expect(boundaryRes.canReadStaging).toBe(true);
+    expect(boundaryRes.canWriteStaging).toBe(true);
+    expect(boundaryRes.canIndexStaging).toBe(true);
+    expect(boundaryRes.crossDatabaseDenied).toBe(true);
+    expect(boundaryRes.status).toBe('ok');
+
+    // HTTP probe endpoint
+    const res = await request(app).get('/api/staging/boundary-check');
+    expect(res.status).toBe(200);
+    expect(res.body.stagingDatabase).toBe('crashlab_pilot_staging');
+    expect(res.body.canReadStaging).toBe(true);
+    expect(res.body.canWriteStaging).toBe(true);
+    expect(res.body.canIndexStaging).toBe(true);
+    expect(res.body.crossDatabaseDenied).toBe(true);
+    expect(JSON.stringify(res.body)).not.toContain('mongodb://');
+    expect(JSON.stringify(res.body)).not.toContain('mongodb+srv://');
+    expect(JSON.stringify(res.body)).not.toContain('password');
+  });
+
+  // 19. Boundary probe restricted in production
+  it('19. restricts boundary probe in production environments', async () => {
+    const prevEnv = process.env.NODE_ENV;
+    const prevTest = process.env.TEST_MODE;
+
+    try {
+      process.env.NODE_ENV = 'production';
+      process.env.TEST_MODE = 'false';
+
+      const res = await request(app).get('/api/staging/boundary-check');
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('FORBIDDEN_ENVIRONMENT');
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+      process.env.TEST_MODE = prevTest;
+    }
   });
 });
